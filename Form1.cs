@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Collections.Generic;
 using Microsoft.ML;
 using Microsoft.ML.Data;
@@ -11,6 +12,7 @@ namespace Sentiment
     public partial class Form1 : Form
     {
         private readonly string _dataPath;
+        private readonly string _userDataPath;
         private MLContext? _mlContext;
         private ITransformer? _model;
         private PredictionEngine<SentimentData, SentimentPrediction>? _predictionEngine;
@@ -19,6 +21,42 @@ namespace Sentiment
         {
             InitializeComponent();
             _dataPath = Path.Combine(AppContext.BaseDirectory, "Data", "yelp_labelled.txt");
+            // Prefer storing user labels in the project directory (Data/user_labels.txt) so it can be referenced
+            string projectRoot = FindProjectRoot();
+            if (!string.IsNullOrEmpty(projectRoot))
+            {
+                var dataDir = Path.Combine(projectRoot, "Data");
+                if (!Directory.Exists(dataDir))
+                    Directory.CreateDirectory(dataDir);
+                _userDataPath = Path.Combine(dataDir, "user_labels.txt");
+            }
+            else
+            {
+                // Fallback to AppData
+                var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+                var userDir = Path.Combine(appData, "Sentiment");
+                if (!Directory.Exists(userDir))
+                    Directory.CreateDirectory(userDir);
+                _userDataPath = Path.Combine(userDir, "user_labels.txt");
+            }
+        }
+
+        private string? FindProjectRoot()
+        {
+            try
+            {
+                var dir = new DirectoryInfo(AppContext.BaseDirectory);
+                while (dir != null)
+                {
+                    // look for .csproj file
+                    var csproj = dir.GetFiles("*.csproj");
+                    if (csproj != null && csproj.Length > 0)
+                        return dir.FullName;
+                    dir = dir.Parent;
+                }
+            }
+            catch { }
+            return null;
         }
 
         private void btnSubmit_Click(object sender, EventArgs e)
@@ -37,20 +75,15 @@ namespace Sentiment
                 // Sanitize text to avoid breaking the TSV format
                 var safeText = text.Replace('\t', ' ').Replace('\r', ' ').Replace('\n', ' ').Trim();
 
-                // Ensure directory exists
-                var dir = Path.GetDirectoryName(_dataPath);
-                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-                    Directory.CreateDirectory(dir);
-
-                // Append to data file in the same format: text <tab> label
-                using (var sw = File.AppendText(_dataPath))
+                // Append to user-specific file so original dataset remains intact
+                using (var sw = File.AppendText(_userDataPath))
                 {
                     sw.WriteLine($"{safeText}\t{(label ? 1 : 0)}");
                 }
 
-                WriteLine($"Submitted: '{safeText}' with label {(label ? 1 : 0)}");
+                WriteLine($"Submitted to user_labels: '{safeText}' with label {(label ? 1 : 0)}");
 
-                // Retrain and evaluate on updated data
+                // Retrain and evaluate on combined data
                 RetrainAndEvaluate();
             }
             catch (Exception ex)
@@ -169,24 +202,45 @@ namespace Sentiment
             var samples = new List<SentimentData>();
             try
             {
-                foreach (var line in File.ReadLines(_dataPath))
+                // Read original data
+                if (File.Exists(_dataPath))
                 {
-                    if (string.IsNullOrWhiteSpace(line))
-                        continue;
-
-                    // Expect last tab-separated token to be label
-                    var idx = line.LastIndexOf('\t');
-                    if (idx <= 0 || idx >= line.Length - 1)
+                    foreach (var line in File.ReadLines(_dataPath))
                     {
-                        // skip malformed line
-                        continue;
+                        if (string.IsNullOrWhiteSpace(line))
+                            continue;
+
+                        var idx = line.LastIndexOf('\t');
+                        if (idx <= 0 || idx >= line.Length - 1)
+                            continue;
+
+                        var text = line.Substring(0, idx).Trim();
+                        var labelToken = line.Substring(idx + 1).Trim();
+                        if (int.TryParse(labelToken, out int labelInt))
+                        {
+                            samples.Add(new SentimentData { SentimentText = text, Label = labelInt == 1 });
+                        }
                     }
+                }
 
-                    var text = line.Substring(0, idx).Trim();
-                    var labelToken = line.Substring(idx + 1).Trim();
-                    if (int.TryParse(labelToken, out int labelInt))
+                // Read user-submitted data and append
+                if (!string.IsNullOrEmpty(_userDataPath) && File.Exists(_userDataPath))
+                {
+                    foreach (var line in File.ReadLines(_userDataPath))
                     {
-                        samples.Add(new SentimentData { SentimentText = text, Label = labelInt == 1 });
+                        if (string.IsNullOrWhiteSpace(line))
+                            continue;
+
+                        var idx = line.LastIndexOf('\t');
+                        if (idx <= 0 || idx >= line.Length - 1)
+                            continue;
+
+                        var text = line.Substring(0, idx).Trim();
+                        var labelToken = line.Substring(idx + 1).Trim();
+                        if (int.TryParse(labelToken, out int labelInt))
+                        {
+                            samples.Add(new SentimentData { SentimentText = text, Label = labelInt == 1 });
+                        }
                     }
                 }
 
